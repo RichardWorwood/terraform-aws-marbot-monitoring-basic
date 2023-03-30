@@ -21,6 +21,12 @@ variable "tags" {
   default     = {}
 }
 
+variable "permissions_boundary_policy_arn" {
+  description = "IAM policy ARN used as a permission boundary for all created IAM roles."
+  type        = string
+  default     = ""
+}
+
 variable "budget_threshold" {
   type        = number
   description = "Receive an alert, if your monthly AWS costs (in USD) are higher than this value (works in us-east-1 only; set to -1 to disable)."
@@ -47,7 +53,7 @@ variable "trusted_advisor" {
 
 variable "root_user_login" {
   type        = bool
-  description = "Receive an alert, if a root user login is performed."
+  description = "Receive an alert, if a root user login is performed (works in us-east-1 only)."
   default     = true
 }
 
@@ -123,9 +129,33 @@ variable "ebs_failed" {
   default     = true
 }
 
-variable "ssm_failed" {
+variable "ssm_failed" { # should be called ssm_maintenance_window_Failed, but was not changed for backward compatibility
   type        = bool
-  description = "Receive an alert, if any SSM maintenance window execution fails."
+  description = "Receive an alert, if any SSM Maintenance Window execution fails."
+  default     = true
+}
+
+variable "ssm_automation_failed" {
+  type        = bool
+  description = "Receive an alert, if any SSM Automation execution fails."
+  default     = true
+}
+
+variable "ssm_configuration_compliance_failed" {
+  type        = bool
+  description = "Receive an alert, if any SSM Configuration Compliance check fails."
+  default     = true
+}
+
+variable "ssm_command_failed" {
+  type        = bool
+  description = "Receive an alert, if any SSM Command execution fails."
+  default     = true
+}
+
+variable "ssm_state_manager_failed" {
+  type        = bool
+  description = "Receive an alert, if any SSM State Manager association fails."
   default     = true
 }
 
@@ -143,7 +173,13 @@ variable "glue_job_failed" {
 
 variable "ec2_spot_instance_interruption" {
   type        = bool
-  description = "Receive an alert, if any EC2 Spot instance is interrupted."
+  description = "Receive a notification, if any EC2 Spot instance is interrupted."
+  default     = true
+}
+
+variable "ecs_task_failed" {
+  type        = bool
+  description = "Receive an alert, if any ECS task fails."
   default     = true
 }
 
@@ -153,15 +189,33 @@ variable "ecs_service_failed" {
   default     = true
 }
 
-variable "macie_alert" {
+variable "ecs_deployment_failed" {
   type        = bool
-  description = "Receive an alert, if Macie fires an alert."
+  description = "Receive an alert, if any ECS deployment fails."
+  default     = true
+}
+
+variable "ecs_spot_interruption" {
+  type        = bool
+  description = "Receive an alert, if an ECS Fargate Spot task gets interrupted or fails to launch."
+  default     = true
+}
+
+variable "macie_finding" {
+  type        = bool
+  description = "Receive an alert, if Macie generates a new finding."
   default     = true
 }
 
 variable "security_hub_finding" {
   type        = bool
   description = "Receive an alert, if a SecurityHub finding is created."
+  default     = true
+}
+
+variable "security_hub_insight" {
+  type        = bool
+  description = "Receive an alert, if a SecurityHub insight is created."
   default     = true
 }
 
@@ -207,6 +261,42 @@ variable "iot_analytics_dataset_alert" {
   default     = true
 }
 
+variable "es_software_update_failed" {
+  type        = bool
+  description = "Receive an alert, if an Elasticsearch/OpenSearch software update fails."
+  default     = true
+}
+
+variable "backup_failed" {
+  type        = bool
+  description = "Receive an alert, if AWS Backup fails."
+  default     = true
+}
+
+variable "athena_failed" {
+  type        = bool
+  description = "Receive an alert, if Athena fails."
+  default     = true
+}
+
+variable "app_flow_failed" {
+  type        = bool
+  description = "Receive an alert, if AppFlow fails."
+  default     = true
+}
+
+variable "ec2_fleet_failed" {
+  type        = bool
+  description = "Receive an alert, if EC2 (Spot) Fleet fails"
+  default     = true
+}
+
+variable "xray_insight_update" {
+  type        = bool
+  description = "Receive an alert, if X-Ray Insight detects a fault."
+  default     = true
+}
+
 variable "code_pipeline_notifications" {
   type        = bool
   description = "Receive a notification, if a CodePipeline pipeline succeedes."
@@ -221,19 +311,55 @@ variable "code_commit_pull_request_notifications" {
 
 variable "ami_update_notification_ecs_optimized" {
   type        = bool
-  description = "Receive an alert, if a new ECS optimized AMI is released (works in us-east-1 only)."
+  description = "Receive a notification, if a new ECS optimized AMI is released (works in us-east-1 only)."
   default     = false
 }
 
 variable "ami_update_notification_amazon_linux" {
   type        = bool
-  description = "Receive an alert, if a new Amazon Linux AMI is released (works in us-east-1 only)."
+  description = "Receive a notification, if a new Amazon Linux AMI is released (works in us-east-1 only)."
   default     = false
 }
 
 variable "ami_update_notification_amazon_linux2" {
   type        = bool
-  description = "Receive an alert, if a new Amazon Linux 2 AMI is released (works in us-east-1 only)."
+  description = "Receive a notification, if a new Amazon Linux 2 AMI is released (works in us-east-1 only)."
+  default     = true
+}
+
+variable "acm_certificate_approaching_expiration" {
+  type        = bool
+  description = "Receive a notification, if an ACM certificate approaches expiration."
+  default     = true
+}
+
+variable "es_software_update_notifications" {
+  type        = bool
+  description = "Receive notifications about Elasticsearch/OpenSearch software updates."
+  default     = true
+}
+
+variable "application_auto_scaling_notifications" {
+  type        = bool
+  description = "Receive notifications about Application Auto Scaling Scaling Activities."
+  default     = true
+}
+
+variable "backup_notifications" {
+  type        = bool
+  description = "Receive notifications about AWS Backup activities."
+  default     = true
+}
+
+variable "ecs_deployment_notifications" {
+  type        = bool
+  description = "Receive notifications when AWS deployments succeed."
+  default     = true
+}
+
+variable "elastic_beanstalk_failed" {
+  type        = bool
+  description = "Receive an alert, if Elastic Beanstalk fails."
   default     = true
 }
 

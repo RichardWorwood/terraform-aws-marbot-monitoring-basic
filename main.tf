@@ -1,7 +1,7 @@
 terraform {
   required_version = ">= 0.12.0"
   required_providers {
-    aws    = ">= 2.48.0"
+    aws    = ">= 4.15.0"
     random = ">= 2.2"
   }
 }
@@ -79,7 +79,7 @@ data "aws_iam_policy_document" "topic_policy" {
     }
   }
 
-  statement {
+  statement { # SES https://docs.aws.amazon.com/ses/latest/dg/configure-sns-notifications.html
     sid       = "Sid3"
     effect    = "Allow"
     actions   = ["sns:Publish"]
@@ -144,7 +144,7 @@ resource "aws_cloudwatch_event_target" "monitoring_jump_start_connection" {
 {
   "Type": "monitoring-jump-start-tf-connection",
   "Module": "basic",
-  "Version": "0.12.2",
+  "Version": "0.25.0",
   "Partition": "${data.aws_partition.current.partition}",
   "AccountId": "${data.aws_caller_identity.current.account_id}",
   "Region": "${data.aws_region.current.name}"
@@ -486,7 +486,7 @@ resource "aws_budgets_budget" "savings_plans_utilization" {
 
 resource "aws_cloudwatch_event_rule" "root_user_login" {
   depends_on = [aws_sns_topic_subscription.marbot]
-  count      = (var.root_user_login && var.enabled) ? 1 : 0
+  count      = (data.aws_region.current.name == "us-east-1" && var.root_user_login && var.enabled) ? 1 : 0
 
   name          = "marbot-basic-root-user-login-${random_id.id8.hex}"
   description   = "A root user login was detected, better use IAM users instead. (created by marbot)"
@@ -508,7 +508,7 @@ JSON
 }
 
 resource "aws_cloudwatch_event_target" "root_user_login" {
-  count = (var.root_user_login && var.enabled) ? 1 : 0
+  count = (data.aws_region.current.name == "us-east-1" && var.root_user_login && var.enabled) ? 1 : 0
 
   rule      = join("", aws_cloudwatch_event_rule.root_user_login.*.name)
   target_id = "marbot"
@@ -520,7 +520,8 @@ resource "aws_cloudwatch_event_target" "root_user_login" {
 resource "aws_iam_role" "cloud_watch_alarm_filter" {
   count = ((var.cloud_watch_alarm_fired || var.cloud_watch_alarm_orphaned || var.cloud_watch_alarm_auto_close) && var.enabled) ? 1 : 0
 
-  name_prefix = "marbot"
+  name_prefix          = "marbot"
+  permissions_boundary = var.permissions_boundary_policy_arn
 
   assume_role_policy = <<EOF
 {
@@ -566,7 +567,7 @@ resource "aws_iam_role_policy" "cloud_watch_alarm_filter" {
           "logs:PutLogEvents"
         ],
         "Effect": "Allow",
-        "Resource": "${join("", aws_cloudwatch_log_group.cloud_watch_alarm_filter.*.arn)}"
+        "Resource": "${join("", aws_cloudwatch_log_group.cloud_watch_alarm_filter.*.arn)}:*"
       }
     ]
   }
@@ -580,7 +581,7 @@ resource "aws_lambda_function" "cloud_watch_alarm_filter" {
   function_name    = "marbot-basic-cloud-watch-alarm-filter-${random_id.id8.hex}"
   role             = join("", aws_iam_role.cloud_watch_alarm_filter.*.arn)
   handler          = "cloud-watch.handler"
-  runtime          = "nodejs12.x"
+  runtime          = "nodejs16.x"
   memory_size      = 1024
   timeout          = 30
   environment {
@@ -909,9 +910,47 @@ resource "aws_cloudwatch_event_target" "code_commit_pull_request_notifications" 
 }
 
 
+
+resource "aws_cloudwatch_event_rule" "code_build_failed_without_initiator_code_pipeline" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.code_build_failed && var.code_pipeline_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-code-build-failed-${random_id.id8.hex}"
+  description   = "A CodeBuild build failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.codebuild"
+  ],
+  "detail-type": [
+    "CodeBuild Build State Change"
+  ],
+  "detail": {
+    "build-status": [
+      "FAILED"
+    ],
+    "additional-information": {
+      "initiator": [{"anything-but": {"prefix": "codepipeline/"}}]
+    }
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "code_build_failed_without_initiator_code_pipeline" {
+  count = (var.code_build_failed && var.code_pipeline_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.code_build_failed_without_initiator_code_pipeline.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
 resource "aws_cloudwatch_event_rule" "code_build_failed" {
   depends_on = [aws_sns_topic_subscription.marbot]
-  count      = (var.code_build_failed && var.enabled) ? 1 : 0
+  count      = (var.code_build_failed && var.code_pipeline_failed == false && var.enabled) ? 1 : 0
 
   name          = "marbot-basic-code-build-failed-${random_id.id8.hex}"
   description   = "A CodeBuild build failed. (created by marbot)"
@@ -934,7 +973,7 @@ JSON
 }
 
 resource "aws_cloudwatch_event_target" "code_build_failed" {
-  count = (var.code_build_failed && var.enabled) ? 1 : 0
+  count = (var.code_build_failed && var.code_pipeline_failed == false && var.enabled) ? 1 : 0
 
   rule      = join("", aws_cloudwatch_event_rule.code_build_failed.*.name)
   target_id = "marbot"
@@ -992,13 +1031,7 @@ resource "aws_cloudwatch_event_rule" "health_issue" {
   ],
   "detail-type": [
     "AWS Health Event"
-  ],
-  "detail": {
-    "eventTypeCategory": [
-      "issue",
-      "scheduledChange"
-    ]
-  }
+  ]
 }
 JSON
 }
@@ -1027,7 +1060,8 @@ resource "aws_cloudwatch_event_rule" "auto_scaling_failed" {
   ],
   "detail-type": [
     "EC2 Instance Launch Unsuccessful",
-    "EC2 Instance Terminate Unsuccessful"
+    "EC2 Instance Terminate Unsuccessful",
+    "EC2 Auto Scaling Instance Refresh Failed"
   ]
 }
 JSON
@@ -1145,12 +1179,12 @@ resource "aws_cloudwatch_event_target" "ebs_failed" {
 
 
 
-resource "aws_cloudwatch_event_rule" "ssm_failed" {
+resource "aws_cloudwatch_event_rule" "ssm_failed" { # should be called ssm_maintenance_window, but was not changed for backward compatibility
   depends_on = [aws_sns_topic_subscription.marbot]
   count      = (var.ssm_failed && var.enabled) ? 1 : 0
 
   name          = "marbot-basic-ssm-failed-${random_id.id8.hex}"
-  description   = "SSM maintenance window execution failed. (created by marbot)"
+  description   = "SSM Maintenance Window execution failed. (created by marbot)"
   tags          = var.tags
   event_pattern = <<JSON
 {
@@ -1170,10 +1204,153 @@ resource "aws_cloudwatch_event_rule" "ssm_failed" {
 JSON
 }
 
-resource "aws_cloudwatch_event_target" "ssm_failed" {
+resource "aws_cloudwatch_event_target" "ssm_failed" { # should be called ssm_maintenance_window_failed, but was not changed for backward compatibility
   count = (var.ssm_failed && var.enabled) ? 1 : 0
 
   rule      = join("", aws_cloudwatch_event_rule.ssm_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ssm_automation_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ssm_automation_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ssm-automation-failed-${random_id.id8.hex}"
+  description   = "SSM Automation execution failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ssm"
+  ],
+  "detail-type": [
+    "EC2 Automation Execution Status-change Notification"
+  ],
+  "detail": {
+    "status": [
+      "Failed",
+      "TimedOut"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ssm_automation_failed" {
+  count = (var.ssm_automation_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ssm_automation_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ssm_configuration_compliance_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ssm_configuration_compliance_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ssm-compliance-failed-${random_id.id8.hex}"
+  description   = "SSM Configuration Compliance check failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ssm"
+  ],
+  "detail-type": [
+    "Configuration Compliance State Change"
+  ],
+  "detail": {
+    "compliance-status": [
+      "non_compliant"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ssm_configuration_compliance_failed" {
+  count = (var.ssm_configuration_compliance_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ssm_configuration_compliance_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ssm_command_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ssm_command_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ssm-command-failed-${random_id.id8.hex}"
+  description   = "SSM Command execution failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ssm"
+  ],
+  "detail-type": [
+    "EC2 Command Status-change Notification"
+  ],
+  "detail": {
+    "status": [
+      "Delivery Timed Out",
+      "Execution Timed Out",
+      "Failed",
+      "Incomplete",
+      "Rate Exceeded",
+      "Access Denied",
+      "No Instances In Tag"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ssm_command_failed" {
+  count = (var.ssm_command_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ssm_command_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ssm_state_manager_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ssm_state_manager_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ssm-state-manager-failed-${random_id.id8.hex}"
+  description   = "SSM State Manager association failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ssm"
+  ],
+  "detail-type": [
+    "EC2 State Manager Association State Change"
+  ],
+  "detail": {
+    "status": [
+      "Failed"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ssm_state_manager_failed" {
+  count = (var.ssm_state_manager_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ssm_state_manager_failed.*.name)
   target_id = "marbot"
   arn       = join("", aws_sns_topic.marbot.*.arn)
 }
@@ -1184,6 +1361,7 @@ resource "aws_db_event_subscription" "rds_instance_issue" {
   depends_on = [aws_sns_topic_subscription.marbot]
   count      = (var.rds_issue && var.enabled) ? 1 : 0
 
+  name_prefix = "marbot"
   sns_topic   = join("", aws_sns_topic.marbot.*.arn)
   source_type = "db-instance"
   tags        = var.tags
@@ -1195,6 +1373,7 @@ resource "aws_db_event_subscription" "rds_cluster_issue" {
   depends_on = [aws_sns_topic_subscription.marbot]
   count      = (var.rds_issue && var.enabled) ? 1 : 0
 
+  name_prefix = "marbot"
   sns_topic   = join("", aws_sns_topic.marbot.*.arn)
   source_type = "db-cluster"
   tags        = var.tags
@@ -1250,7 +1429,8 @@ resource "aws_cloudwatch_event_rule" "ec2_spot_instance_interruption" {
     "aws.ec2"
   ],
   "detail-type": [
-    "EC2 Spot Instance Interruption Warning"
+    "EC2 Spot Instance Interruption Warning",
+    "EC2 Instance Rebalance Recommendation"
   ]
 }
 JSON
@@ -1260,6 +1440,77 @@ resource "aws_cloudwatch_event_target" "ec2_spot_instance_interruption" {
   count = (var.ec2_spot_instance_interruption && var.enabled) ? 1 : 0
 
   rule      = join("", aws_cloudwatch_event_rule.ec2_spot_instance_interruption.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ecs_task_failed_to_start" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ecs_task_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ecs-task-failed-to-start-${random_id.id8.hex}"
+  description   = "ECS Task failed: Task failed to start. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ecs"
+  ],
+  "detail-type": [
+    "ECS Task State Change"
+  ],
+  "detail": {
+    "group": [{"anything-but": {"prefix": "service:"}}],
+    "lastStatus": ["STOPPED"],
+    "stopCode": ["TaskFailedToStart"]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ecs_task_failed_to_start" {
+  count = (var.ecs_task_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ecs_task_failed_to_start.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ecs_task_failed_non_zero" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ecs_task_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ecs-task-failed-non-zero-${random_id.id8.hex}"
+  description   = "ECS Task failed: Essential container exited with non zero exit code. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ecs"
+  ],
+  "detail-type": [
+    "ECS Task State Change"
+  ],
+  "detail": {
+    "group": [{"anything-but": {"prefix": "service:"}}],
+    "lastStatus": ["STOPPED"],
+    "stopCode": ["EssentialContainerExited"],
+    "containers": {
+      "exitCode": [{"anything-but": 0}]
+    }
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ecs_task_failed_non_zero" {
+  count = (var.ecs_task_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ecs_task_failed_non_zero.*.name)
   target_id = "marbot"
   arn       = join("", aws_sns_topic.marbot.*.arn)
 }
@@ -1301,12 +1552,115 @@ resource "aws_cloudwatch_event_target" "ecs_service_failed" {
 
 
 
-resource "aws_cloudwatch_event_rule" "macie_alert" {
+resource "aws_cloudwatch_event_rule" "ecs_deployment_failed" {
   depends_on = [aws_sns_topic_subscription.marbot]
-  count      = (var.macie_alert && var.enabled) ? 1 : 0
+  count      = (var.ecs_deployment_failed && var.enabled) ? 1 : 0
 
-  name          = "marbot-basic-macie-alert-${random_id.id8.hex}"
-  description   = "Alerts (risk >= high) from AWS Macie. (created by marbot)"
+  name          = "marbot-basic-ecs-deployment-failed-${random_id.id8.hex}"
+  description   = "ECS Deployment failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ecs"
+  ],
+  "detail-type": [
+    "ECS Deployment State Change"
+  ],
+  "detail": {
+    "eventName": [
+      "SERVICE_DEPLOYMENT_FAILED"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ecs_deployment_failed" {
+  count = (var.ecs_deployment_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ecs_deployment_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ecs_deployment_notifications" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ecs_deployment_notifications && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ecs-deployment-notifications-${random_id.id8.hex}"
+  description   = "ECS Service deployment succeeded. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ecs"
+  ],
+  "detail-type": [
+    "ECS Deployment State Change"
+  ],
+  "detail": {
+    "eventName": [
+      "SERVICE_DEPLOYMENT_COMPLETED"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ecs_deployment_notifications" {
+  count = (var.ecs_deployment_notifications && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ecs_deployment_notifications.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ecs_spot_interruption" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ecs_spot_interruption && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ecs-spot-interruption-${random_id.id8.hex}"
+  description   = "ECS task is stopping due to Fargate Spot interruption. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ecs"
+  ],
+  "detail-type": [
+    "ECS Task State Change"
+  ],
+  "detail": {
+    "stopCode": [
+      "SpotInterruption",
+      "TerminationNotice"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ecs_spot_interruption" {
+  count = (var.ecs_spot_interruption && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ecs_spot_interruption.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "macie_finding" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.macie_finding && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-macie-finding-${random_id.id8.hex}"
+  description   = "Findings (severity >= high) from AWS Macie. (created by marbot)"
   tags          = var.tags
   event_pattern = <<JSON
 {
@@ -1314,31 +1668,30 @@ resource "aws_cloudwatch_event_rule" "macie_alert" {
     "aws.macie"
   ],
   "detail-type": [
-    "Macie Alert"
+    "Macie Finding"
   ],
   "detail": {
-    "trigger": {
-      "risk": [{"numeric": [">=", 8]}]
+    "severity": {
+      "score": [{"numeric": [">=", 3]}]
     }
   }
 }
 JSON
 }
 
-resource "aws_cloudwatch_event_target" "macie_alert" {
-  count = (var.macie_alert && var.enabled) ? 1 : 0
+resource "aws_cloudwatch_event_target" "macie_finding" {
+  count = (var.macie_finding && var.enabled) ? 1 : 0
 
-  rule      = join("", aws_cloudwatch_event_rule.macie_alert.*.name)
+  rule      = join("", aws_cloudwatch_event_rule.macie_finding.*.name)
   target_id = "marbot"
   arn       = join("", aws_sns_topic.marbot.*.arn)
 }
 
-
-
 resource "aws_iam_role" "security_hub_workflow" {
   count = (var.security_hub_finding && var.enabled) ? 1 : 0
 
-  name_prefix = "marbot"
+  name_prefix          = "marbot"
+  permissions_boundary = var.permissions_boundary_policy_arn
 
   assume_role_policy = <<EOF
 {
@@ -1379,7 +1732,7 @@ resource "aws_iam_role_policy" "security_hub_workflow" {
           "logs:PutLogEvents"
         ],
         "Effect": "Allow",
-        "Resource": "${join("", aws_cloudwatch_log_group.security_hub_workflow.*.arn)}"
+        "Resource": "${join("", aws_cloudwatch_log_group.security_hub_workflow.*.arn)}:*"
       }
     ]
   }
@@ -1394,7 +1747,7 @@ resource "aws_lambda_function" "security_hub_workflow" {
   function_name    = "marbot-basic-security-hub-finding-workflow-${random_id.id8.hex}"
   role             = join("", aws_iam_role.security_hub_workflow.*.arn)
   handler          = "security-hub.handler"
-  runtime          = "nodejs12.x"
+  runtime          = "nodejs16.x"
   memory_size      = 1024
   timeout          = 30
   tags             = var.tags
@@ -1508,6 +1861,38 @@ resource "aws_cloudwatch_event_target" "security_hub_finding_workflow" {
   rule      = join("", aws_cloudwatch_event_rule.security_hub_finding.*.name)
   target_id = "marbot-securityhub"
   arn       = join("", aws_lambda_function.security_hub_workflow.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "security_hub_insight" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.security_hub_insight && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-security-hub-insight-${random_id.id8.hex}"
+  description   = "Insights from AWS SecurityHub. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.securityhub"
+  ],
+  "detail-type": [
+    "Security Hub Insight Results"
+  ],
+  "detail": {
+    "number of results": [{"numeric": [">=", 1]}]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "security_hub_insight" {
+  count = (var.security_hub_insight && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.security_hub_insight.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
 }
 
 
@@ -1657,18 +2042,21 @@ resource "aws_cloudwatch_event_rule" "ecr_image_scan_finding" {
   tags          = var.tags
   event_pattern = <<JSON
 {
-  "source": [ 
+  "source": [
     "aws.ecr"
   ],
   "detail-type": [
     "ECR Image Scan"
   ],
   "detail": {
+    "scan-status": ["COMPLETE"],
     "finding-severity-counts": {
-      "CRITICAL": [{"exists": false}, {"numeric": [">", 0]}],
-      "HIGH": [{"exists": false}, {"numeric": [">", 0]}],
-      "MEDIUM": [{"exists": false}, {"numeric": [">", 0]}],
-      "UNDEFINED": [{"exists": false}, {"numeric": [">", 0]}]
+      "$or": [
+        {"CRITICAL": [{"numeric": [">", 0]}]},
+        {"HIGH": [{"numeric": [">", 0]}]},
+        {"MEDIUM": [{"numeric": [">", 0]}]},
+        {"UNDEFINED": [{"numeric": [">", 0]}]}
+      ]
     }
   }
 }
@@ -1747,6 +2135,441 @@ resource "aws_cloudwatch_event_target" "iot_analytics_dataset_alert" {
   count = (var.iot_analytics_dataset_alert && var.enabled) ? 1 : 0
 
   rule      = join("", aws_cloudwatch_event_rule.iot_analytics_dataset_alert.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "acm_certificate_approaching_expiration" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.acm_certificate_approaching_expiration && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-acm-certificate-expiration-${random_id.id8.hex}"
+  description   = "Approaching expiration from ACM Certificate. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.acm"
+  ],
+  "detail-type": [
+    "ACM Certificate Approaching Expiration"
+  ],
+  "detail": {
+    "DaysToExpiry": [1, 2, 3, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "acm_certificate_approaching_expiration" {
+  count = (var.acm_certificate_approaching_expiration && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.acm_certificate_approaching_expiration.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "es_software_update_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.es_software_update_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-es-software-update-failed-${random_id.id8.hex}"
+  description   = "Alerts from Elasticsearch/OpenSearch software updates. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.es"
+  ],
+  "detail-type": [
+    "Amazon ES Service Software Update Notification",
+    "Amazon OpenSearch Service Software Update Notification"
+  ],
+  "detail": {
+    "status": [
+      "Failed"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "es_software_update_failed" {
+  count = (var.es_software_update_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.es_software_update_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "es_software_update_notifications" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.es_software_update_notifications && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-es-software-update-notifications-${random_id.id8.hex}"
+  description   = "Notifications from Elasticsearch/OpenSearch software updates. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.es"
+  ],
+  "detail-type": [
+    "Amazon ES Service Software Update Notification",
+    "Amazon OpenSearch Service Software Update Notification"
+  ],
+  "detail": {
+    "status": [
+      "Available",
+      "Completed",
+      "Required"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "es_software_update_notifications" {
+  count = (var.es_software_update_notifications && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.es_software_update_notifications.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "application_auto_scaling_notifications" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.application_auto_scaling_notifications && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-application-auto-scaling-${random_id.id8.hex}"
+  description   = "Notifications from Application Auto Scaling. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.application-autoscaling"
+  ],
+  "detail-type": [
+    "Application Auto Scaling Scaling Activity State Change"
+  ]
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "application_auto_scaling_notifications" {
+  count = (var.application_auto_scaling_notifications && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.application_auto_scaling_notifications.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "backup_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.backup_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-backup-failed-${random_id.id8.hex}"
+  description   = "AWS Backup failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.backup"
+  ],
+  "detail-type": [
+    "Backup Job State Change",
+    "Copy Job State Change",
+    "Restore Job State Change"
+  ],
+  "detail": {
+    "state": [
+      "FAILED"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "backup_failed" {
+  count = (var.backup_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.backup_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "backup_notifications" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.backup_notifications && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-backup-notifications-${random_id.id8.hex}"
+  description   = "Notifications from AWS Backup. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.backup"
+  ],
+  "detail-type": [
+    "Backup Job State Change",
+    "Copy Job State Change",
+    "Restore Job State Change"
+  ],
+  "detail": {
+    "state": [
+      "COMPLETED"
+  ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "backup_notifications" {
+  count = (var.backup_notifications && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.backup_notifications.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "athena_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.athena_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-athena-failed-${random_id.id8.hex}"
+  description   = "Athena failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.athena"
+  ],
+  "detail-type": [
+    "Athena Query State Change"
+  ],
+  "detail": {
+    "currentState": [
+      "FAILED"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "athena_failed" {
+  count = (var.athena_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.athena_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "app_flow_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.app_flow_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-app-flow-failed-${random_id.id8.hex}"
+  description   = "AppFlow failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.appflow"
+  ],
+  "detail-type": [
+    "AppFlow End Flow Run Report"
+  ],
+  "detail": {
+    "status": [
+      "Execution Failed"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "app_flow_failed" {
+  count = (var.app_flow_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.app_flow_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "app_flow_deactivated" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.app_flow_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-app-flow-deactivated-${random_id.id8.hex}"
+  description   = "AppFlow deactivated. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.appflow"
+  ],
+  "detail-type": [
+    "AppFlow Event Flow Deactivated",
+    "AppFlow Scheduled Flow Deactivated"
+  ]
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "app_flow_deactivated" {
+  count = (var.app_flow_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.app_flow_deactivated.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ec2_fleet_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ec2_fleet_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ec2-fleet-failed-${random_id.id8.hex}"
+  description   = "EC2 Fleet failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ec2fleet"
+  ],
+  "detail-type": [
+    "EC2 Fleet Error"
+  ]
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ec2_fleet_failed" {
+  count = (var.ec2_fleet_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ec2_fleet_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "ec2_spot_fleet_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.ec2_fleet_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-ec2-spot-fleet-failed-${random_id.id8.hex}"
+  description   = "EC2 Spot Fleet failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.ec2spotfleet"
+  ],
+  "detail-type": [
+    "EC2 Spot Fleet Error"
+  ]
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "ec2_spot_fleet_failed" {
+  count = (var.ec2_fleet_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.ec2_spot_fleet_failed.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+
+resource "aws_cloudwatch_event_rule" "xray_insight_update" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.xray_insight_update && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-xray-insight-update-${random_id.id8.hex}"
+  description   = "X-Ray Insight fault detected. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [ 
+    "aws.xray"
+  ],
+  "detail-type": [
+    "AWS X-Ray Insight Update"
+  ],
+  "detail": {
+    "State": [
+      "ACTIVE"
+    ],
+    "Categories": [
+      "FAULT"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "xray_insight_update" {
+  count = (var.xray_insight_update && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.xray_insight_update.*.name)
+  target_id = "marbot"
+  arn       = join("", aws_sns_topic.marbot.*.arn)
+}
+
+
+resource "aws_cloudwatch_event_rule" "elastic_beanstalk_failed" {
+  depends_on = [aws_sns_topic_subscription.marbot]
+  count      = (var.elastic_beanstalk_failed && var.enabled) ? 1 : 0
+
+  name          = "marbot-basic-elastic-beanstalk-failed-${random_id.id8.hex}"
+  description   = "Elastic Beanstalk failed. (created by marbot)"
+  tags          = var.tags
+  event_pattern = <<JSON
+{
+  "source": [
+    "aws.elasticbeanstalk"
+  ],
+  "detail-type": [
+    "Elastic Beanstalk resource status change",
+    "Other resource status change",
+    "Health status change",
+    "ManagedUpdateStatusChangeEnabled"
+  ],
+  "detail": {
+    "Severity": [
+      "WARN",
+      "ERROR"
+    ]
+  }
+}
+JSON
+}
+
+resource "aws_cloudwatch_event_target" "elastic_beanstalk_failed" {
+  count = (var.elastic_beanstalk_failed && var.enabled) ? 1 : 0
+
+  rule      = join("", aws_cloudwatch_event_rule.elastic_beanstalk_failed.*.name)
   target_id = "marbot"
   arn       = join("", aws_sns_topic.marbot.*.arn)
 }
